@@ -1,0 +1,52 @@
+FROM debian:12-slim
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    automake \
+    autoconf \
+    libtool \
+    pkg-config \
+    libpng-dev \
+    libjpeg-dev \
+    zlib1g-dev \
+    python3 \
+    python3-pip \
+    python3-venv \
+    nginx \
+    supervisor \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Setup Python environment first
+RUN python3 -m venv venv
+COPY docker/requirements.txt .
+RUN . venv/bin/activate && pip install --no-cache-dir -r requirements.txt
+
+# Copy API service and configuration files
+COPY docker/api_service.py .
+COPY docker/nginx.conf /etc/nginx/
+COPY docker/supervisord.conf /etc/supervisor/conf.d/
+COPY docker/swtdetect.c /app/ccv/bin/
+
+# Create necessary directories
+RUN mkdir -p /app/uploads /app/results /var/log/supervisor /app/ccv/lib /app/ccv/bin
+
+# The lib and samples directories will be mounted as volumes
+# Build script will be executed at runtime when volumes are mounted
+
+# Copy and setup entrypoint script
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose ports
+EXPOSE 80 443
+
+# Use entrypoint to build on first run
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]

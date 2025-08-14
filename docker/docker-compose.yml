@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  ccv-text-detection:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile
+    container_name: ccv-swt-api
+    ports:
+      - "8080:80"
+    volumes:
+      # Mount source code directories for development
+      - ../lib:/app/ccv/lib:ro
+      - ../samples:/app/ccv/samples:ro
+      # Mount writable directories
+      - ./uploads:/app/uploads
+      - ./results:/app/results
+      - ./logs:/var/log/supervisor
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
