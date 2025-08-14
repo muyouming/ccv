@@ -1,0 +1,111 @@
+# Ultra-minimal Alpine-based build
+# Stage 1: Build stage using Alpine
+FROM alpine:3.18 AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    gcc \
+    g++ \
+    make \
+    musl-dev \
+    libpng-dev \
+    jpeg-dev \
+    zlib-dev
+
+WORKDIR /build
+
+# Copy source code
+COPY lib /build/ccv/lib
+COPY samples /build/ccv/samples
+
+# Build CCV library with Alpine-specific optimizations
+WORKDIR /build/ccv/lib
+RUN ./configure --disable-docs --disable-debug \
+    && make clean \
+    && make -j$(nproc) CFLAGS="-O3 -fPIC"
+
+# Build static swtdetect binary
+WORKDIR /build/ccv/bin
+COPY docker/swtdetect.c ./
+RUN gcc -o swtdetect swtdetect.c \
+    -I../lib -L../lib -lccv \
+    -lpng -ljpeg -lz -lm \
+    -O3 -static-libgcc \
+    -D HAVE_LIBPNG -D HAVE_LIBJPEG \
+    && strip --strip-all swtdetect
+
+# Stage 2: Python builder
+FROM python:3.11-alpine AS python-builder
+
+RUN apk add --no-cache gcc musl-dev libffi-dev
+
+WORKDIR /app
+COPY docker/requirements.txt .
+RUN python -m venv /app/venv \
+    && /app/venv/bin/pip install --no-cache-dir --no-compile -r requirements.txt \
+    && find /app/venv -type f -name "*.pyc" -delete \
+    && find /app/venv -type d -name "__pycache__" -delete \
+    && find /app/venv -type f -name "*.so" -exec strip --strip-unneeded {} \;
+
+# Stage 3: Final minimal runtime
+FROM python:3.11-alpine
+
+# Install only runtime dependencies
+RUN apk add --no-cache \
+    libpng \
+    jpeg \
+    zlib \
+    nginx \
+    supervisor \
+    curl \
+    && rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+# Copy virtual environment
+COPY --from=python-builder /app/venv /app/venv
+
+# Copy binary and essential files
+COPY --from=builder /build/ccv/bin/swtdetect /app/ccv/bin/
+COPY --from=builder /build/ccv/samples/*.png /app/ccv/samples/
+
+# Copy application files
+COPY docker/api_service.py .
+
+# Create minimal nginx config
+RUN echo 'server { \
+    listen 80; \
+    location / { \
+        proxy_pass http://127.0.0.1:8000; \
+        proxy_set_header Host $host; \
+        proxy_set_header X-Real-IP $remote_addr; \
+    } \
+}' > /etc/nginx/http.d/default.conf
+
+# Create minimal supervisor config
+RUN echo '[supervisord] \
+nodaemon=true \
+\
+[program:nginx] \
+command=/usr/sbin/nginx -g "daemon off;" \
+\
+[program:api] \
+command=/app/venv/bin/uvicorn api_service:app --host 0.0.0.0 --port 8000 \
+directory=/app \
+autostart=true \
+autorestart=true' > /etc/supervisord.conf
+
+# Create directories
+RUN mkdir -p /app/uploads /app/results /run/nginx
+
+# Environment
+ENV PATH="/app/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost/health || exit 1
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  ccv-text-detection:
+    build:
+      context: ../
+      dockerfile: docker/Dockerfile.slim
+    container_name: ccv-swt-api-slim
+    ports:
+      - "8080:80"
+    volumes:
+      # Only mount necessary directories
+      - ./uploads:/app/uploads
+      - ./results:/app/results
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=WARNING  # Reduce logging in production
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M  # Limit memory usage
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

@@ -1,0 +1,102 @@
+# Multi-stage build for minimal image size
+# Stage 1: Build stage
+FROM debian:12-slim AS builder
+
+# Install only essential build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    make \
+    libc6-dev \
+    libpng-dev \
+    libjpeg-dev \
+    zlib1g-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy source code
+COPY lib /build/ccv/lib
+COPY samples /build/ccv/samples
+
+# Build CCV library
+WORKDIR /build/ccv/lib
+RUN ./configure --disable-docs --disable-debug \
+    && make clean \
+    && make -j$(nproc) \
+    && strip --strip-unneeded libccv.a 2>/dev/null || true
+
+# Build swtdetect binary
+WORKDIR /build/ccv/bin
+COPY docker/swtdetect.c ./
+RUN gcc -o swtdetect swtdetect.c \
+    -I../lib -L../lib -lccv \
+    -lpng -ljpeg -lz -lm -lpthread \
+    -O3 -march=native -flto \
+    -D HAVE_LIBPNG -D HAVE_LIBJPEG \
+    && strip --strip-all swtdetect
+
+# Stage 2: Python dependencies builder
+FROM python:3.11-slim AS python-builder
+
+WORKDIR /app
+RUN python -m venv /app/venv
+COPY docker/requirements-slim.txt .
+RUN /app/venv/bin/pip install --no-cache-dir --no-compile -r requirements-slim.txt \
+    && find /app/venv -type f -name "*.pyc" -delete \
+    && find /app/venv -type d -name "__pycache__" -delete
+
+# Stage 3: Final runtime image
+FROM python:3.11-slim
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpng16-16 \
+    libjpeg62-turbo \
+    zlib1g \
+    nginx \
+    supervisor \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/share/doc/* \
+    && rm -rf /usr/share/man/*
+
+WORKDIR /app
+
+# Copy virtual environment from python-builder
+COPY --from=python-builder /app/venv /app/venv
+
+# Copy compiled binary and libraries from builder
+COPY --from=builder /build/ccv/bin/swtdetect /app/ccv/bin/
+COPY --from=builder /build/ccv/lib/libccv.a /app/ccv/lib/
+
+# Copy only necessary sample files
+COPY --from=builder /build/ccv/samples/*.png /app/ccv/samples/
+COPY --from=builder /build/ccv/samples/face.sqlite3 /app/ccv/samples/
+
+# Copy application files
+COPY docker/api_service.py .
+COPY docker/nginx.conf /etc/nginx/
+COPY docker/supervisord.conf /etc/supervisor/conf.d/
+
+# Create necessary directories
+RUN mkdir -p /app/uploads /app/results /var/log/supervisor \
+    && rm -rf /etc/nginx/sites-enabled/default \
+    && rm -rf /etc/nginx/sites-available/default
+
+# Set environment variables
+ENV PATH="/app/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Expose ports
+EXPOSE 80
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost/health || exit 1
+
+# Start services
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/supervisord.conf"]
